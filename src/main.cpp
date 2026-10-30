@@ -1,10 +1,26 @@
-#include <sys/socket.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <string.h>
-#include <unistd.h>
-#include <ifaddrs.h>
-#include <net/if.h>
+// #define _WIN32
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+
+    using socket_t = SOCKET;
+    void CloseSocket(socket_t fd) {
+        closesocket(fd);
+    }
+#elif __linux__
+    #include <sys/socket.h>
+    #include <netdb.h>
+    #include <arpa/inet.h>
+    #include <string.h>
+    #include <unistd.h>
+    #include <ifaddrs.h>
+    #include <net/if.h>
+
+    using socket_t = int;
+    void CloseSocket(socket_t fd) {
+        close(fd);
+    }
+#endif
 
 #include <iostream>
 #include <string>
@@ -27,13 +43,42 @@ struct FileHeader{
 };
 #pragma pack(pop)
 
-enum ApplicationType {
+enum ApplicationTypeT {
     Reciever, Sender
 };
 
 class FileSender {
 private:
     bool PrintIPAddress() {
+        addrinfo* address{};
+
+        #ifdef _WIN32
+        char host_name[256]{};
+        if (gethostname(host_name, sizeof(host_name)) != 0) {
+            std::cerr << "Error: can't get hostname\n";
+            return 1;
+        }
+
+        addrinfo hints{};
+        hints.ai_family   = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        int code = getaddrinfo(host_name, PORT, &hints, &address);
+        if (code != 0) {
+            cerr << "Error: can't get address info\n";
+            return false;
+        }
+
+        char ipString[INET_ADDRSTRLEN];
+        for (auto* ptr = address; ptr != nullptr; ptr = ptr->ai_next) {
+            struct sockaddr_in* sockaddr_ipv4 = (struct sockaddr_in*)ptr->ai_addr;
+            
+            inet_ntop(AF_INET, &(sockaddr_ipv4->sin_addr), ipString, INET_ADDRSTRLEN);    
+            break;
+        }
+        std::cout << "Sender IP: " << ipString << std::endl;
+
+        #elif __linux__
         ifaddrs* sender_address{};
         if (getifaddrs(&sender_address) == -1) {
             cerr << "Error: Can't get ip address\n"
@@ -80,12 +125,13 @@ private:
         }
 
         freeifaddrs(sender_address);
-    
+        #endif
+
         return true;
     }
 public:
-    int reciever_fd{-1};
-    int sender_fd{-1};
+    socket_t reciever_fd{};
+    socket_t sender_fd{};
 
     bool Init() {
         addrinfo* address{};
@@ -135,11 +181,18 @@ public:
         #pragma region
         
         int yes = 1;
-        if (setsockopt(reciever_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
-            cerr << "Error: can't set setsockopt\n"
-                 << "errno: " << strerror(errno) << '\n';
+        #ifdef _WIN32
+        if (setsockopt(reciever_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes)) == SOCKET_ERROR) {
+            std::cerr << "Error: can't set setsockopt\n";
             return false;
         }
+        #elif __linux__
+        if (setsockopt(reciever_fd, SOL_SOCKET, SO_REUSEADDR, (const void*)&yes, sizeof(yes)) == -1) {
+            std::cerr << "Error: can't set setsockopt\n"
+                      << "errno: " << strerror(errno) << '\n';
+            return false;
+        }
+        #endif
 
         #pragma endregion
 
@@ -320,18 +373,14 @@ public:
 //    }
 
     ~FileSender() {
-        if (reciever_fd != -1) {
-            close(reciever_fd);
-        }
-        if (sender_fd != -1) {
-            close(sender_fd);
-        }
+        CloseSocket(reciever_fd);
+        CloseSocket(sender_fd);
     }
 };
 
 class FileReciever {
 public:
-    int fd{-1};
+    socket_t fd{};
 
     bool Init(const char* address_str) {
         addrinfo* address{};
@@ -466,21 +515,19 @@ public:
     // }
     
     ~FileReciever() {
-        if (fd != -1) {
-            close(fd);
-        }
+        CloseSocket(fd);
     }
 };
 
 
-ApplicationType GetApplicationType(const char* argument) {
+ApplicationTypeT GetApplicationTypeT(const char* argument) {
     sockaddr_in client_sockaddr{};
     int code = inet_pton(AF_INET, argument, &client_sockaddr.sin_addr);
 
     return code == 1 ? Reciever : Sender;
 }
 
-bool GetFileStream(std::fstream& file_stream, const ApplicationType application_type, const char** argv, int argc) {
+bool GetFileStream(std::fstream& file_stream, const ApplicationTypeT application_type, const char** argv, int argc) {
     if (application_type == Sender) {
         if (!std::filesystem::exists(argv[1])) {
             cerr << "Error: file \"" << argv[1] << "\" doesn't exist\n";
@@ -561,7 +608,20 @@ bool RecieveBuffer(char* buffer, int bytes_count, int fd, bool forceFull = true)
 
 
 int main(int argc, char const *argv[]) {
-    const ApplicationType application_type = GetApplicationType(argv[1]);
+    #ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            std::cerr << "WSAStartup failed!\n";
+            return false;
+        }
+    #endif
+
+    if (argc == 1) {
+        cerr<<"Error: not enough arguments\n";
+        return 1;
+    }
+
+    const ApplicationTypeT application_type = GetApplicationTypeT(argv[1]);
     bool is_output_file_specified = (argc == 3);
 
     std::fstream file_stream;
@@ -580,7 +640,7 @@ int main(int argc, char const *argv[]) {
 
         std::string_view file_name(argv[1]);
 
-        u_int32_t slash_char_pos = file_name.find_first_of('/');
+        uint32_t slash_char_pos = file_name.find_first_of("/\\");
         if (slash_char_pos != file_name.npos) {
             file_name.remove_prefix(slash_char_pos+1);
         }
@@ -664,7 +724,11 @@ int main(int argc, char const *argv[]) {
 
         cout << "File recievied!\n";
     }
-    
+
+    #ifdef _WIN32
+    WSACleanup();
+    #endif
+
     file_stream.close();
     return 0;
 }
