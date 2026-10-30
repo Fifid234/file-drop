@@ -1,5 +1,10 @@
 Simple and lightweight tool to send files on local networks through tcp connection
 ---
+You can build it with make:
+```bash
+  make build
+```
+
 Examples of usage:
 
 Send file:
