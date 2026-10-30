@@ -1,2 +1,2 @@
 build:
-	g++ src/* -o bin/main
+	g++ src/* -O3 -o file-drop
