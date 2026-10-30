@@ -2,7 +2,7 @@ Simple and lightweight tool to send files on local networks through tcp connecti
 ---
 You can build it with make:
 ```bash
-  make build
+  make
 ```
 
 Examples of usage:
